@@ -30,7 +30,7 @@ public:
 signals:
     void logMessage(const QString &msg);
 
-private:
+public:
     std::vector<pid_t> pids;
      bool ipc_created;
 };

@@ -4,6 +4,7 @@
 #include <QWidget>
 #include <QPixmap>
 #include <QTimer>
+#include <QCoreApplication>
 #include <functional>
 
 class TransportBeltWidget : public QWidget

@@ -100,13 +100,13 @@ bool ProductionController::startAllLines() {
 }
 
 void ProductionController::stopAllLines() {
-    // set running=0 and wake semaphores
+    // Marcar como no running
     int fd = shm_open(SHM_NAME, O_RDWR, 0666);
     if (fd != -1) {
         ShmState* s = (ShmState*)mmap(NULL, sizeof(ShmState), PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
         if (s!=MAP_FAILED) {
             s->running = 0;
-            // wake semaphores so children exit
+            // Despertar semáforos para que los hijos salgan
             for (int i=0;i<NUM_STATIONS;i++){
                 sem_t* st = open_sem_stage(i);
                 if (st) sem_post(st);
@@ -118,28 +118,27 @@ void ProductionController::stopAllLines() {
         ::close(fd);
     }
 
-    // give them a moment to exit gracefully
-    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    // Dar MENOS tiempo para salida graceful (reducido de 400ms a 100ms)
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-    // ensure children are terminated
+    // Enviar SIGKILL directamente (más rápido que SIGTERM)
     for (pid_t pid : pids) {
         if (pid > 0) {
-            // try graceful first
-            kill(pid, SIGTERM);
+            kill(pid, SIGKILL);  // SIGKILL en lugar de SIGTERM
         }
     }
 
-    // wait for children
+    // Waitpid sin bloquear indefinidamente
     for (pid_t pid : pids) {
         if (pid > 0) {
             int status = 0;
-            waitpid(pid, &status, 0);
-            emit logMessage(QString("Stopped pid %1").arg(pid));
+            waitpid(pid, &status, WNOHANG);  // WNOHANG = no bloquear
         }
     }
-    pids.clear();
-}
 
+    pids.clear();
+    emit logMessage("✅ Procesos hijos terminados");
+}
 void ProductionController::restartAllLines() {
     emit logMessage("Restarting all lines...");
     stopAllLines();

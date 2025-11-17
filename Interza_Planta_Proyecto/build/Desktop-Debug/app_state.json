@@ -1,14 +1,1 @@
-{
-    "inProgressProducts": [
-        {
-            "currentStation": 0,
-            "productId": 1
-        }
-    ],
-    "sessionInfo": {
-        "lastClosed": "2025-11-17T05:06:29",
-        "nextProductId": 2,
-        "totalProductsFinished": 0
-    },
-    "windowGeometry": "AdnQywADAAAAAAAAAAAAFAAABVUAAAL/AAAAAAAAADQAAASvAAAC/wAAAAACAAAABVYAAAAAAAAANAAABVUAAAL/"
-}
+{"inProgressProducts":[],"sessionInfo":{"lastClosed":"2025-11-17T06:43:11","nextProductId":26,"totalProductsFinished":25},"windowGeometry":"AdnQywADAAAAAAAAAAAAFAAABVUAAAL/AAAAAAAAADQAAASvAAAC/wAAAAACAAAABVYAAAAAAAAANAAABVUAAAL/"}

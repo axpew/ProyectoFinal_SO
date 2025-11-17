@@ -34,37 +34,73 @@ void TransportBeltWidget::setupWithImage(const QString &resourcePath)
 
 void TransportBeltWidget::startAnimation(int cycles, std::function<void()> onFinished)
 {
+    // CRÍTICO: Detener completamente cualquier animación en progreso
+    if (moveTimer->isActive()) {
+        moveTimer->stop();
+    }
+
+    // Esperar a que el timer termine
+    QCoreApplication::processEvents();
+
+    // Resetear estado
+    totalSteps = 0;
+    paused = false;
+    onFinish = nullptr;
+
+    // Configurar nueva animación
     onFinish = onFinished;
 
-    const int desired_seconds = 5;
+    const int desired_seconds = 5;  // Duración fija
+    const int interval_ms = 30;     // Intervalo del timer
 
-    int distance = width();
-    if (distance < 200) distance = 600;
-
+    // SOLUCIÓN DEFINITIVA: Calcular basado en el ancho REAL actual
+    int currentWidth = width();
     int pw = productPixmap.width() > 0 ? productPixmap.width() : 64;
-    int totalDistance = distance + pw;
 
-    int interval_ms = moveTimer->interval();
+    // El producto debe viajar desde -pw hasta currentWidth (salir completamente)
+    int totalDistance = currentWidth + pw;
 
-    double required_speed = (double)totalDistance * interval_ms / (1000.0 * desired_seconds);
-    int calcSpeed = qMax(1, (int)qRound(required_speed));
+    // Calcular cuántos frames tenemos en 5 segundos
+    int totalFrames = (desired_seconds * 1000) / interval_ms;  // 5000ms / 30ms = ~166 frames
 
-    beltSpeed = calcSpeed;
+    // Velocidad necesaria para recorrer totalDistance en totalFrames
+    // Redondear hacia ARRIBA para asegurar que llega al final
+    double exactSpeed = (double)totalDistance / (double)totalFrames;
+    beltSpeed = qMax(4, (int)ceil(exactSpeed));  // ceil() para redondear hacia arriba
 
-    int stepsPerCycle = totalDistance / qMax(1, beltSpeed);
-    totalSteps = qMax(1, cycles) * stepsPerCycle;
+    // Recalcular steps basado en la velocidad ajustada
+    // Esto asegura que el producto recorra toda la distancia
+    totalSteps = (totalDistance + beltSpeed - 1) / beltSpeed;  // División con redondeo hacia arriba
 
+    // SIEMPRE empezar desde la izquierda (fuera de vista)
     productX = -pw;
-    paused = false;
-    if (!moveTimer->isActive()) moveTimer->start();
+
+    // Debug
+    qDebug() << "Animación Estación - Width:" << currentWidth
+             << "| Distance:" << totalDistance
+             << "| Speed:" << beltSpeed << "px/frame"
+             << "| Steps:" << totalSteps
+             << "| Duración:" << (totalSteps * interval_ms / 1000.0) << "seg";
+
+    // Forzar actualización visual
+    update();
+    QCoreApplication::processEvents();
+
+    // Iniciar timer
+    moveTimer->start();
 }
 
 void TransportBeltWidget::stopAnimation()
 {
-    if (moveTimer->isActive()) moveTimer->stop();
+    if (moveTimer->isActive()) {
+        moveTimer->stop();
+    }
+
     totalSteps = 0;
-    productX = -productPixmap.width();
+    int pw = productPixmap.width() > 0 ? productPixmap.width() : 64;
+    productX = -pw;  // Fuera de vista a la izquierda
     paused = false;
+    onFinish = nullptr;
     update();
 }
 
@@ -80,39 +116,67 @@ void TransportBeltWidget::resumeAnimation()
 {
     if (paused) {
         paused = false;
-        if (totalSteps > 0) moveTimer->start();
+        if (totalSteps > 0) {
+            moveTimer->start();
+        }
     }
 }
 
 void TransportBeltWidget::resetPosition()
 {
-    if (moveTimer->isActive()) moveTimer->stop();
+    if (moveTimer->isActive()) {
+        moveTimer->stop();
+    }
+
     totalSteps = 0;
-    productX = -productPixmap.width();
+    int pw = productPixmap.width() > 0 ? productPixmap.width() : 64;
+    productX = -pw;  // Fuera de vista a la izquierda
     paused = false;
+    onFinish = nullptr;
     update();
 }
 
 void TransportBeltWidget::animateStep()
 {
-    productX += beltSpeed;
-    totalSteps--;
-
+    // Verificar que debemos animar
     if (totalSteps <= 0) {
         moveTimer->stop();
-        productX = -productPixmap.width();  // Ocultar
+
+        // Asegurar que el producto esté completamente fuera de vista
+        int pw = productPixmap.width() > 0 ? productPixmap.width() : 64;
+        productX = width() + pw;
         update();
 
         if (onFinish) {
-            onFinish();
+            auto callback = onFinish;
+            onFinish = nullptr;
+            callback();
         }
         return;
     }
 
-    if (productX > width()) {
-        productX = -productPixmap.width();
+    // Avanzar el producto
+    productX += beltSpeed;
+    totalSteps--;
+
+    // Si terminamos los steps
+    if (totalSteps <= 0) {
+        moveTimer->stop();
+
+        // Producto fuera de vista
+        int pw = productPixmap.width() > 0 ? productPixmap.width() : 64;
+        productX = width() + pw;
+        update();
+
+        if (onFinish) {
+            auto callback = onFinish;
+            onFinish = nullptr;
+            callback();
+        }
+        return;
     }
 
+    // Continuar animación
     update();
 }
 
@@ -124,7 +188,7 @@ void TransportBeltWidget::paintEvent(QPaintEvent *)
     QRect r = rect();
     p.fillRect(r, QColor(245, 238, 220));
 
-    // Franjas
+    // Franjas de la banda (siempre visibles)
     int stripeW = 48;
     int offset = (productX / 4) % stripeW;
     for (int xx = -stripeW + offset; xx < width(); xx += stripeW) {
@@ -132,8 +196,8 @@ void TransportBeltWidget::paintEvent(QPaintEvent *)
         p.fillRect(stripe, QColor(230, 220, 200));
     }
 
-    // Producto
-    if (productX > -productPixmap.width() && productX < width()) {
+    // Dibujar producto SOLO si está en rango razonable
+    if (productX > -productPixmap.width() && productX < width() + 20) {
         if (!productPixmap.isNull()) {
             int y = (height() - productPixmap.height()) / 2;
             p.drawPixmap(productX, y, productPixmap);

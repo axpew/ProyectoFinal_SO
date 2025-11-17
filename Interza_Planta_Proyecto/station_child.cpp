@@ -25,7 +25,7 @@ extern "C" void _child_entry(int idx, int seed) {
 
     sem_t* sem_stage = open_sem_stage(idx);
     sem_t* sem_ack   = open_sem_ack(idx);
-    sem_t* sem_trans = open_sem_transition();  // Semáforo de transición
+    sem_t* sem_trans = open_sem_transition();
 
     srand(seed ^ idx);
 
@@ -40,51 +40,103 @@ extern "C" void _child_entry(int idx, int seed) {
         if (!s->running) break;
         if (s->station_paused[idx]) continue;
 
-        // *** ADQUIRIR MUTEX DE TRANSICIÓN ***
-        if (sem_trans) sem_wait(sem_trans);
-
         ProductInfo currentProduct;
+        currentProduct.productId = 0;
 
-        if (idx == 0) {
-            currentProduct.productId = s->next_product_id++;
-        } else {
-            currentProduct = s->product_in_station[idx - 1];
-            if (currentProduct.productId <= 0) {
-                if (sem_trans) sem_post(sem_trans);  // Liberar mutex
-                continue;
+        // *** FASE 1: ADQUIRIR PRODUCTO ***
+        bool productAcquired = false;
+        int retryCount = 0;
+        const int MAX_RETRIES = 10;
+
+        while (!productAcquired && retryCount < MAX_RETRIES) {
+            if (sem_trans) sem_wait(sem_trans);
+
+            if (idx == 0) {
+                // Estación 0: verificar si slot está vacío
+                if (s->product_in_station[0].productId == 0) {
+                    currentProduct.productId = s->next_product_id++;
+                    s->product_in_station[idx] = currentProduct;
+                    productAcquired = true;
+                }
+            } else {
+                // Otras estaciones: intentar copiar de estación anterior
+                currentProduct = s->product_in_station[idx - 1];
+
+                if (currentProduct.productId > 0) {
+                    s->product_in_station[idx] = currentProduct;
+                    s->product_in_station[idx - 1].productId = 0;
+                    productAcquired = true;
+                }
+            }
+
+            if (sem_trans) sem_post(sem_trans);
+
+            if (!productAcquired) {
+                retryCount++;
+                usleep(50000);  // Esperar 50ms antes de reintentar
             }
         }
 
-        s->product_in_station[idx] = currentProduct;
-
-        // Limpiar anterior
-        if (idx > 0) {
-            s->product_in_station[idx - 1].productId = 0;
+        if (!productAcquired || currentProduct.productId <= 0) {
+            // No se pudo adquirir producto después de reintentos
+            continue;
         }
 
-        // *** LIBERAR MUTEX DE TRANSICIÓN ***
-        if (sem_trans) sem_post(sem_trans);
-
-        // Procesar (fuera del mutex)
+        // *** FASE 2: PROCESAR PRODUCTO ***
         int work_ms = 800 + (rand() % 800);
         usleep(work_ms * 1000);
 
-        s->station_done[idx] = 1;
+        // *** FASE 3: MARCAR COMO TERMINADO ***
+        bool markSuccess = false;
+        if (sem_trans) sem_wait(sem_trans);
 
+        if (s->product_in_station[idx].productId == currentProduct.productId) {
+            s->station_done[idx] = 1;
+            markSuccess = true;
+        }
+
+        if (sem_trans) sem_post(sem_trans);
+
+        if (!markSuccess) {
+            // Producto fue sobrescrito durante el procesamiento
+            continue;
+        }
+
+        // *** FASE 4: ESPERAR ACK DE LA GUI ***
         if (sem_ack) sem_wait(sem_ack);
 
+        // *** FASE 5: TRANSFERIR A SIGUIENTE ESTACIÓN ***
         if (idx + 1 < NUM_STATIONS) {
-            sem_t* next = open_sem_stage(idx + 1);
-            if (next) sem_post(next);
+            // Verificar que el producto aún está presente
+            bool canTransfer = false;
+            if (sem_trans) sem_wait(sem_trans);
+
+            if (s->product_in_station[idx].productId == currentProduct.productId) {
+                canTransfer = true;
+            }
+
+            if (sem_trans) sem_post(sem_trans);
+
+            if (canTransfer) {
+                sem_t* next = open_sem_stage(idx + 1);
+                if (next) {
+                    sem_post(next);
+                    // CRÍTICO: Esperar tiempo suficiente para que la siguiente estación copie
+                    // Con 5 productos en paralelo, necesitamos más tiempo
+                    usleep(250000);  // 250ms - tiempo generoso para la copia
+                }
+            }
         } else {
-            // Última estación: limpiar con mutex
+            // Última estación: limpiar su propio slot
             if (sem_trans) sem_wait(sem_trans);
             s->product_in_station[idx].productId = 0;
             if (sem_trans) sem_post(sem_trans);
         }
 
+        // *** FASE 6: AUTO-SEÑAL PARA ESTACIÓN 0 ***
         if (idx == 0) {
-            usleep(300000);
+            // Delay más largo para evitar saturar el pipeline
+            usleep(400000);  // 400ms - controlar tasa de producción
             if (!s->station_paused[idx] && s->running) {
                 if (sem_stage) sem_post(sem_stage);
             }

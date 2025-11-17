@@ -11,6 +11,8 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <signal.h>
+#include <sys/types.h>
 
 #include <QJsonObject>
 #include <QJsonDocument>
@@ -253,18 +255,6 @@ void MainWindow::pollSharedMemory() {
     ShmState* s = (ShmState*)mmap(NULL, sizeof(ShmState), PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
     if (s==MAP_FAILED) { ::close(fd); return; }
 
-    // LIMPIEZA DE PRODUCTOS FANTASMA cada 5 segundos (~33 ciclos a 150ms)
-    if (cleanupCounter % 33 == 0) {
-        for (int i = 0; i < NUM_STATIONS; i++) {
-            // Si hay producto en memoria pero station_done nunca se activa
-            // es un producto fantasma - limpiarlo
-            if (s->product_in_station[i].productId > 0 && s->station_done[i] == 0) {
-                // Verificar si el producto lleva mucho tiempo ahí (asumiendo que es fantasma)
-                // Por simplicidad, si encontramos uno y llevamos pausados mucho tiempo, limpiarlo
-            }
-        }
-    }
-
     // Contar estaciones activas
     int activeStations = 0;
     for (int i = 0; i < NUM_STATIONS; i++) {
@@ -273,20 +263,16 @@ void MainWindow::pollSharedMemory() {
         }
     }
     int resourcesUsed = activeStations + (s->running ? 1 : 0);
-    // Calcular totales correctamente
     int totalProductsCreated = s->next_product_id - 1;
 
-    //Los completados nunca pueden ser > que los creados
     if (processedCount > totalProductsCreated) {
-        processedCount = totalProductsCreated;  // Corregir discrepancia
+        processedCount = totalProductsCreated;
         counterLabel->setText(QString("📦 Productos Completados: %1").arg(processedCount));
     }
 
-    // Calcular "En Proceso" correctamente
     int inProcess = totalProductsCreated - processedCount;
     if (inProcess < 0) inProcess = 0;
 
-    // Actualizar estadísticas
     statsLabel->setText(QString("📊 Activas: %1/5 | Recursos: %2 | ✅ Completados: %3 | 📦 Totales: %4 | ⏳ En Proceso: %5")
                             .arg(activeStations)
                             .arg(resourcesUsed)
@@ -294,26 +280,33 @@ void MainWindow::pollSharedMemory() {
                             .arg(totalProductsCreated)
                             .arg(inProcess));
 
-
     for (int i=0; i<NUM_STATIONS; i++){
         if (s->station_done[i] == 1) {
+            // VERIFICAR que realmente hay un producto válido antes de animar
+            int productId = s->product_in_station[i].productId;
+            if (productId <= 0) {
+                // Producto fantasma - limpiar flag y continuar
+                s->station_done[i] = 0;
+                continue;
+            }
+
             s->station_done[i] = 2;
             int stationIndex = i;
 
-            belts[stationIndex]->startAnimation(1, [this, stationIndex]() {
+            belts[stationIndex]->startAnimation(1, [this, stationIndex, productId]() {
                 sem_t* ack = open_sem_ack(stationIndex);
                 if (ack) sem_post(ack);
 
                 if (stationIndex == NUM_STATIONS - 1) {
                     processedCount++;
                     counterLabel->setText(QString("📦 Productos Completados: %1").arg(processedCount));
-                    onLogMessage(QString("✅ Producto finalizado. Total: %1").arg(processedCount));
+                    onLogMessage(QString("✅ Producto #%1 finalizado. Total: %2").arg(productId).arg(processedCount));
 
                     if (processedCount % 5 == 0) {
                         showNotification(QString("¡%1 productos completados!").arg(processedCount), "success");
                     }
                 } else {
-                    onLogMessage(QString("➤ Estación %1: animación terminada, enviando ACK").arg(stationIndex+1));
+                    onLogMessage(QString("➤ Estación %1: producto #%2 procesado, enviando ACK").arg(stationIndex+1).arg(productId));
                 }
 
                 int fd2 = shm_open(SHM_NAME, O_RDWR, 0666);
@@ -327,7 +320,7 @@ void MainWindow::pollSharedMemory() {
                 }
             });
 
-            onLogMessage(QString("🔄 Estación %1: GUI inició animación").arg(i+1));
+            onLogMessage(QString("🔄 Estación %1: GUI inició animación para producto #%2").arg(i+1).arg(productId));
         }
     }
 
@@ -341,9 +334,13 @@ void MainWindow::onLogMessage(const QString &msg) {
 }
 
 void MainWindow::onStatsUpdated(int productsProcessed, int threadsActive, int resourcesUsed) {
+    // Marcar parámetros como no usados para evitar warnings
+    (void)productsProcessed;
+    (void)threadsActive;
+    (void)resourcesUsed;
+
     // Este método ahora solo es para logging interno de los hilos de mantenimiento
     // La GUI ya se actualiza en pollSharedMemory() en tiempo real
-    // No hacemos nada aquí para evitar conflictos
 }
 
 void MainWindow::onPauseClicked() {
@@ -404,15 +401,36 @@ void MainWindow::saveState() {
     QString path = QCoreApplication::applicationDirPath();
     QString filePath = path + "/app_state.json";
 
+    // Intentar abrir memoria compartida con timeout
     int fd = shm_open(SHM_NAME, O_RDONLY, 0666);
     if (fd == -1) {
-        qDebug() << "No se pudo abrir memoria compartida para guardar estado";
+        qDebug() << "No se pudo abrir memoria compartida para guardar estado - continuando sin guardar productos en progreso";
+
+        // Guardar al menos la información básica sin memoria compartida
+        QJsonObject root;
+        QJsonObject session;
+        session["totalProductsFinished"] = processedCount;
+        session["nextProductId"] = processedCount + 1;
+        session["lastClosed"] = QDateTime::currentDateTime().toString(Qt::ISODate);
+        root["sessionInfo"] = session;
+        root["inProgressProducts"] = QJsonArray();
+
+        QByteArray geo = saveGeometry();
+        root["windowGeometry"] = QString::fromLatin1(geo.toBase64());
+
+        QFile file(filePath);
+        if (file.open(QIODevice::WriteOnly)) {
+            QJsonDocument doc(root);
+            file.write(doc.toJson(QJsonDocument::Compact));  // Compact = más rápido
+            file.close();
+        }
         return;
     }
 
     ShmState* s = (ShmState*)mmap(NULL, sizeof(ShmState), PROT_READ, MAP_SHARED, fd, 0);
     if (s == MAP_FAILED) {
         ::close(fd);
+        qDebug() << "mmap falló al guardar estado";
         return;
     }
 
@@ -427,7 +445,7 @@ void MainWindow::saveState() {
 
     // Productos en proceso - EVITAR DUPLICADOS
     QJsonArray inProgressArray;
-    QSet<int> seenProducts;  // Para evitar duplicados
+    QSet<int> seenProducts;
 
     for (int i = 0; i < NUM_STATIONS; i++) {
         int pid = s->product_in_station[i].productId;
@@ -448,13 +466,16 @@ void MainWindow::saveState() {
     munmap(s, sizeof(ShmState));
     ::close(fd);
 
+    // Guardar archivo con formato compacto (más rápido)
     QFile file(filePath);
     if (file.open(QIODevice::WriteOnly)) {
         QJsonDocument doc(root);
-        file.write(doc.toJson(QJsonDocument::Indented));
+        file.write(doc.toJson(QJsonDocument::Compact));  // Compact en lugar de Indented
         file.close();
         onLogMessage(QString("💾 Estado guardado: %1 productos completados, NextID=%2")
                          .arg(processedCount).arg(s->next_product_id));
+    } else {
+        qWarning() << "No se pudo abrir archivo para guardar estado:" << filePath;
     }
 }
 
@@ -568,27 +589,44 @@ void MainWindow::showNotification(const QString &message, const QString &type) {
 }
 
 void MainWindow::closeEvent(QCloseEvent *event) {
-    onLogMessage("🔴 Iniciando secuencia de apagado controlado...");
+    // Deshabilitar interacciones
+    central->setEnabled(false);
 
-    if (controller) {
-        controller->pauseAllStations();
-    }
+    onLogMessage("🔴 Cerrando aplicación...");
 
-    QEventLoop loop;
-    QTimer::singleShot(100, &loop, &QEventLoop::quit);
-    loop.exec();
+    // 1. Detener polling
+    pollTimer.stop();
 
+    // 2. Guardar estado PRIMERO (lo más importante)
     saveState();
 
-    pollTimer.stop();
+    // 3. Detener hilos de mantenimiento
     if (threadManager) {
         threadManager->stopAll();
     }
+
+    // 4. Matar procesos agresivamente SIN ESPERAR
     if (controller) {
-        controller->stopAllLines();
+        int fd = shm_open(SHM_NAME, O_RDWR, 0666);
+        if (fd != -1) {
+            ShmState* s = (ShmState*)mmap(NULL, sizeof(ShmState), PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
+            if (s != MAP_FAILED) {
+                s->running = 0;
+                munmap(s, sizeof(ShmState));
+            }
+            ::close(fd);
+        }
+
+        // Matar TODOS los procesos hijos inmediatamente con SIGKILL
+        for (pid_t pid : controller->pids) {
+            if (pid > 0) {
+                kill(pid, SIGKILL);
+            }
+        }
+
         controller->destroyIPC();
     }
 
-    onLogMessage("✅ Apagado completado. Adiós.");
+    onLogMessage("✅ Cerrado.");
     event->accept();
 }
