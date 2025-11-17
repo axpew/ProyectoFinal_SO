@@ -11,6 +11,8 @@
 #include <semaphore.h>    // sem_open, sem_post, sem_wait
 #include <chrono>
 #include <thread>
+#include <QList>
+#include <QPair>
 
 extern "C" void _child_entry(int idx, int seed); // station_child.cpp
 
@@ -21,26 +23,55 @@ ProductionController::~ProductionController() {
     destroy_ipc();
 }
 
+// Versión simple para inicio limpio. Llama a la versión principal.
 bool ProductionController::initializeIPC() {
-    if (!create_ipc()) { emit logMessage("ERROR create_ipc"); return false; }
-    if (!open_ipc()) { emit logMessage("ERROR open_ipc"); return false; }
+    return initializeIPC(1, {});
+}
 
-    // set running flag and clear flags
+
+bool ProductionController::initializeIPC(int nextProductIdToRestore, const QList<QPair<int, int>>& productsToRestore) {
+
+    if (!create_ipc()) { emit logMessage("ERROR: create_ipc falló."); return false; }
+    if (!open_ipc()) { emit logMessage("ERROR: El controlador no pudo abrir la IPC."); return false; }
+
+
     int fd = shm_open(SHM_NAME, O_RDWR, 0666);
     if (fd == -1) { emit logMessage("shm_open init fail"); return false; }
     ShmState* s = (ShmState*)mmap(NULL, sizeof(ShmState), PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
     ::close(fd);
-    if (s==MAP_FAILED) { emit logMessage("mmap fail"); return false; }
+    if (s == MAP_FAILED) { emit logMessage("mmap fail"); return false; }
+
     s->running = 1;
-    for (int i=0;i<NUM_STATIONS;i++){ s->station_done[i]=0; s->station_paused[i]=0; }
+    for (int i = 0; i < NUM_STATIONS; i++) {
+        s->station_done[i] = 0;
+        s->station_paused[i] = 0;
+        s->product_in_station[i].productId = 0;
+    }
+    s->next_product_id = nextProductIdToRestore;
+
+    for (const auto& pair : productsToRestore) {
+        if (pair.second >= 0 && pair.second < NUM_STATIONS) {
+            s->product_in_station[pair.second].productId = pair.first;
+        }
+    }
     munmap(s, sizeof(ShmState));
 
-    // post stage 0 so station 0 can start
-    sem_t* sem0 = open_sem_stage(0);
-    if (sem0) sem_post(sem0);
+    if (productsToRestore.isEmpty()) {
+        // Inicio limpio: solo arrancamos la estación 0.
+        emit logMessage("Enviando señal de inicio a la estación 0...");
+        sem_t* sem0 = open_sem_stage(0);
+        if (sem0) sem_post(sem0);
+    } else {
+        // Restauración: arrancamos solo las estaciones que tienen un producto.
+        emit logMessage("Enviando señales de restauración a las estaciones...");
+        for (const auto& pair : productsToRestore) {
+            sem_t* sem_stage = open_sem_stage(pair.second);
+            if (sem_stage) sem_post(sem_stage);
+        }
+    }
 
     ipc_created = true;
-    emit logMessage("IPC initialized");
+    emit logMessage("IPC inicializado y producción arrancada.");
     return true;
 }
 
@@ -151,4 +182,11 @@ void ProductionController::resumeStation(int idx) {
     }
     ::close(fd);
     emit logMessage(QString("Resumed station %1").arg(idx));
+}
+
+void ProductionController::pauseAllStations() {
+    for (int i = 0; i < NUM_STATIONS; ++i) {
+        pauseStation(i);
+    }
+    emit logMessage("Todas las estaciones han sido pausadas.");
 }

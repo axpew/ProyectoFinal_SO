@@ -12,6 +12,13 @@
 #include <sys/mman.h>     // mmap, munmap, MAP_SHARED
 #include <sys/stat.h>     // S_IRUSR, S_IWUSR
 
+#include <QJsonObject>
+#include <QJsonDocument>
+#include <QFile>
+#include <QDir>
+#include <QStandardPaths>
+#include <QJsonArray>
+
 #include "ipc_common.h"
 #include <QHBoxLayout>
 #include <QMessageBox>
@@ -35,11 +42,11 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), processedCount(0)
 
     // prepare images list once
     QStringList beltImages = {
-        ":/images/ensamble.png",
-        ":/images/calidad.png",
-        ":/images/empaque.png",
-        ":/images/envoltorio.png",
-        ":/images/pListo.png"
+        ":/ensamble.png",
+        ":/calidad.png",
+        ":/empaque.png",
+        ":/envoltorio.png",
+        ":/pListo.png"
     };
 
     for (int i=0;i<NUM_STATIONS;i++){
@@ -118,36 +125,49 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), processedCount(0)
     connect(threadManager, &ThreadManager::log, this, &MainWindow::onLogMessage);
     threadManager->startAll();
 
-    if (!controller->initializeIPC()) {
-        QMessageBox::critical(this, "Error", "No se pudo inicializar IPC. Asegure permisos y vuelva a intentar.");
+    //Cargamos el estado del archivo JSON.
+    loadState();
+
+    // nicializamos la IPC y arrancamos la producción
+    //    Le pasamos los datos restaurados
+    if (!controller->initializeIPC(m_nextProductIdToRestore, m_productsToRestore)) {
+        QMessageBox::critical(this, "Error", "No se pudo inicializar la IPC y arrancar la producción.");
         return;
     }
 
+    //Arrancamos los procesos hijo.
     if (!controller->startAllLines()) {
         QMessageBox::warning(this, "Warn", "No se pudieron arrancar todos los procesos hijos.");
     }
+
 
     connect(&pollTimer, &QTimer::timeout, this, &MainWindow::pollSharedMemory);
     pollTimer.start(150);
 }
 
 MainWindow::~MainWindow() {
+
+    /*
+    //Guardar el estado actual de la aplicación antes de cerrar
+    saveState();
+
     pollTimer.stop();
     threadManager->stopAll();
     controller->stopAllLines();
     controller->destroyIPC();
+*/
 }
+
 
 void MainWindow::onLineButtonClicked() {
     QPushButton *b = qobject_cast<QPushButton*>(sender());
     int idx = b->property("lineIndex").toInt();
     viewStack->setCurrentIndex(idx);
+
 }
 
 void MainWindow::onShutdownClicked() {
-    controller->stopAllLines();
-    controller->destroyIPC();
-    QTimer::singleShot(500, qApp, &QCoreApplication::quit);
+     this->close(); // Llama a closeEvent() de forma segura
 }
 
 void MainWindow::pollSharedMemory() {
@@ -248,4 +268,162 @@ void MainWindow::onDeleteLotClicked() {
     } else {
         onLogMessage("UI: Reinicio completo, producción desde 0.");
     }
+}
+
+void MainWindow::saveState() {
+    onLogMessage("--- Iniciando saveState ---");
+
+    int fd = shm_open(SHM_NAME, O_RDWR, 0666);
+    if (fd == -1) {
+        onLogMessage("saveState: ERROR al abrir shm. No se puede guardar el estado en proceso.");
+        // No retornamos, podemos guardar al menos el contador.
+    }
+
+    QJsonObject sessionInfoObject;
+    QJsonArray inProgressArray;
+
+    if (fd != -1) {
+        ShmState* s = (ShmState*)mmap(NULL, sizeof(ShmState), PROT_READ, MAP_SHARED, fd, 0);
+        if (s != MAP_FAILED) {
+            sessionInfoObject["nextProductId"] = s->next_product_id;
+            for (int i = 0; i < NUM_STATIONS; ++i) {
+                if (s->product_in_station[i].productId > 0) {
+                    QJsonObject productObject;
+                    productObject["productId"] = s->product_in_station[i].productId;
+                    productObject["currentStation"] = i;
+                    inProgressArray.append(productObject);
+                }
+            }
+            munmap(s, sizeof(ShmState));
+            onLogMessage(QString("saveState: Se encontraron %1 productos en proceso para guardar.").arg(inProgressArray.size()));
+        } else {
+            onLogMessage("saveState: ERROR al mapear shm. No se guardará el estado en proceso.");
+        }
+        ::close(fd);
+    }
+
+    sessionInfoObject["totalProductsFinished"] = processedCount;
+    sessionInfoObject["lastClosed"] = QDateTime::currentDateTime().toString(Qt::ISODate);
+
+    QJsonObject finalStateObject;
+    finalStateObject["sessionInfo"] = sessionInfoObject;
+    finalStateObject["windowGeometry"] = QString(saveGeometry().toBase64());
+    finalStateObject["inProgressProducts"] = inProgressArray;
+
+    QJsonDocument doc(finalStateObject);
+
+
+    //QString path = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    QString path = QCoreApplication::applicationDirPath();
+    QDir dir(path);
+    if (!dir.exists()) {
+        if (dir.mkpath(".")) {
+            onLogMessage("saveState: Creado directorio de datos: " + path);
+        } else {
+            onLogMessage("saveState: ERROR al crear directorio: " + path);
+            return;
+        }
+    }
+    QString filePath = path + "/app_state.json";
+
+    QFile file(filePath);
+    if (!file.open(QIODevice::WriteOnly)) {
+        onLogMessage("saveState: ERROR FATAL al abrir el archivo para escritura: " + filePath);
+        return;
+    }
+
+    file.write(doc.toJson(QJsonDocument::Indented));
+    file.close();
+    onLogMessage(QString("saveState: ¡Éxito! Estado guardado en %1").arg(filePath));
+    onLogMessage("--- Finalizando saveState ---");
+}
+
+void MainWindow::loadState() {
+    //Obtener la ruta del archivo de estado.
+    //QString path = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    QString path = QCoreApplication::applicationDirPath();
+    QString filePath = path + "/app_state.json";
+
+    //Abrir y leer el archivo.
+    QFile file(filePath);
+    if (!file.exists() || !file.open(QIODevice::ReadOnly)) {
+        onLogMessage("No se encontró archivo de estado previo. Iniciando desde cero.");
+        return;
+    }
+    QByteArray savedData = file.readAll();
+    file.close();
+
+    //Parsear el documento JSON.
+    QJsonDocument doc = QJsonDocument::fromJson(savedData);
+    if (doc.isNull() || !doc.isObject()) {
+        onLogMessage("Error: El archivo de estado está corrupto. Iniciando desde cero.");
+        return;
+    }
+    QJsonObject finalStateObject = doc.object();
+
+    //Restaurar la información de la sesión.
+    if (finalStateObject.contains("sessionInfo") && finalStateObject["sessionInfo"].isObject()) {
+        QJsonObject sessionInfoObject = finalStateObject["sessionInfo"].toObject();
+        if (sessionInfoObject.contains("totalProductsFinished")) {
+            processedCount = sessionInfoObject["totalProductsFinished"].toInt();
+            counterLabel->setText(QString("Productos procesados: %1").arg(processedCount));
+        }
+        if (sessionInfoObject.contains("nextProductId")) {
+            // Guardamos esto para usarlo al reiniciar la IPC.
+            m_nextProductIdToRestore = sessionInfoObject["nextProductId"].toInt();
+        }
+    }
+
+    //Restaurarla ventana.
+    if (finalStateObject.contains("windowGeometry") && finalStateObject["windowGeometry"].isString()) {
+        restoreGeometry(QByteArray::fromBase64(finalStateObject["windowGeometry"].toString().toUtf8()));
+    }
+
+    //Restaurar la lista de productos en proceso.
+    if (finalStateObject.contains("inProgressProducts") && finalStateObject["inProgressProducts"].isArray()) {
+        QJsonArray inProgressArray = finalStateObject["inProgressProducts"].toArray();
+        m_productsToRestore.clear();
+        for (const QJsonValue &val : inProgressArray) {
+            QJsonObject productObject = val.toObject();
+            if (productObject.contains("productId") && productObject.contains("currentStation")) {
+                int prodId = productObject["productId"].toInt();
+                int stationIdx = productObject["currentStation"].toInt();
+                m_productsToRestore.append({prodId, stationIdx}); // Se añade a la lista
+                onLogMessage(QString("Producto %1 para restaurar en estación %2").arg(prodId).arg(stationIdx));
+            }
+        }
+    }
+
+    onLogMessage("Estado de la aplicación cargado. Listo para restaurar la línea de producción.");
+}
+
+void MainWindow::closeEvent(QCloseEvent *event) {
+    onLogMessage("Iniciando secuencia de apagado controlado...");
+
+    //CONGELAR: Pausar todas las estaciones para que dejen de moverse.
+    if (controller) {
+        controller->pauseAllStations();
+    }
+
+    //ESPERAR: Para que los procesos hijo procesen la pausa.
+
+    QEventLoop loop;
+    QTimer::singleShot(100, &loop, &QEventLoop::quit);
+    loop.exec();
+
+    //Ahora que todo está quieto, guardamos el estado.
+    saveState();
+
+    //Detiene todo de forma definitiva.
+    pollTimer.stop();
+    if (threadManager) {
+        threadManager->stopAll();
+    }
+    if (controller) {
+        controller->stopAllLines();
+        controller->destroyIPC();
+    }
+
+    onLogMessage("Apagado completado. Adiós.");
+    event->accept();
 }

@@ -10,7 +10,12 @@
 #include <QTextEdit>
 #include <QTimer>
 #include <QVector>
-
+#include <QCloseEvent>
+#include <QJsonObject>
+#include <QJsonDocument>
+#include <QFile>
+#include <QDir>
+#include <QStandardPaths>
 #include "productioncontroller.h"
 #include "threadmanager.h"
 #include "transportbeltwidget.h"
@@ -32,6 +37,8 @@ private slots:
     void pollSharedMemory();
     void onLogMessage(const QString &msg);
 
+protected:
+      void closeEvent(QCloseEvent *event) override;
 private:
     QWidget *central;
     QVBoxLayout *mainLayout;
@@ -60,6 +67,11 @@ private:
     QTimer pollTimer;
 
     int processedCount;
+
+    void saveState(); // Guardará el estado en un archivo JSON
+    void loadState(); // Cargará el estado desde el archivo JSON
+    QList<QPair<int, int>> m_productsToRestore; // Guarda: {productId, stationIndex}
+    int m_nextProductIdToRestore = 1;
 };
 
 #endif // MAINWINDOW_H

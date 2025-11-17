@@ -26,6 +26,8 @@ void TransportBeltWidget::setupWithImage(const QString &resourcePath)
         productPixmap.fill(Qt::gray);
     }
 
+     productPixmap = productPixmap.scaled(64, 64, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+
     productX = -productPixmap.width();
     update();
 }

@@ -1,9 +1,9 @@
 <RCC>
-    <qresource prefix="/images">
-        <file>images/ensamble.png</file>
-        <file>images/calidad.png</file>
-        <file>images/empaque.png</file>
-        <file>images/envoltorio.png</file>
-        <file>images/pListo.png</file>
+    <qresource prefix="/">
+        <file alias="ensamble.png">images/ensamble.png</file>
+        <file alias="calidad.png">images/calidad.png</file>
+        <file alias="empaque.png">images/empaque.png</file>
+        <file alias="envoltorio.png">images/envoltorio.png</file>
+        <file alias="pListo.png">images/pListo.png</file>
     </qresource>
 </RCC>

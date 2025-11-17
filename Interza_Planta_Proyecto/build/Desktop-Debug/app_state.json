@@ -1,0 +1,14 @@
+{
+    "inProgressProducts": [
+        {
+            "currentStation": 0,
+            "productId": 1
+        }
+    ],
+    "sessionInfo": {
+        "lastClosed": "2025-11-16T22:06:32",
+        "nextProductId": 2,
+        "totalProductsFinished": 0
+    },
+    "windowGeometry": "AdnQywADAAAAAAAyAAAAFAAABH0AAAL/AAAAMgAAADQAAAR9AAAC/wAAAAAAAAAABVYAAAAyAAAANAAABH0AAAL/"
+}

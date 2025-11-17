@@ -47,35 +47,61 @@ extern "C" void _child_entry(int idx, int seed) {
 
         if (!s->running) break;
 
-        // simulate processing
-        int work_ms = 800 + (rand() % 800); // un poco más de trabajo para notar animación
+
+
+        // --- INICIO DE LA LÓGICA DE PERSISTENCIA ---
+
+        //Determinar el ID del producto actual
+        ProductInfo currentProduct;
+        if (idx == 0) {
+            // Estación 0: Crea un nuevo producto. Toma el siguiente ID disponible
+            // de la memoria compartida y lo incrementa para la próxima vez.
+            // Esto necesita protección si múltiples procesos lo modifican,
+            // pero como solo la estación 0 lo hace, es seguro.
+            currentProduct.productId = s->next_product_id++;
+        } else {
+            // Demás estaciones: Toman la información del producto de la estación anterior.
+            currentProduct = s->product_in_station[idx - 1];
+        }
+
+        //Registra el producto actual en la memoria compartida
+        s->product_in_station[idx] = currentProduct;
+
+        // --- FIN DE PERSISTENCIA ---
+
+
+        int work_ms = 800 + (rand() % 800);
         usleep(work_ms * 1000);
 
-        // mark done for GUI to animate
+
         s->station_done[idx] = 1;
 
-        // wait GUI ack (GUI will sem_post ack after animation)
+
         if (sem_ack) {
             sem_wait(sem_ack);
         }
 
-        // after ack, if not last station, post next stage semaphore
+        // H. Pasar el relevo a la siguiente estación (si no es la última)
         if (idx + 1 < NUM_STATIONS) {
             sem_t* next = open_sem_stage(idx + 1);
             if (next) sem_post(next);
         }
 
-        // IMPORTANT: allow station 0 to continuously create new jobs
-        // by reposting its own stage semaphore after finishing.
-        // This means station 0 will keep producing as long as it's not paused.
+        //Estación 0 debe auto-reactivarse para crear un nuevo producto
+        // y mantener la línea de producción alimentada.
         if (idx == 0) {
-            // repost its own stage so another product can start immediately
             if (sem_stage) sem_post(sem_stage);
         }
 
-        // GUI will reset station_done[idx] to 0 after handling
+        // Limpiar el ID del producto de la estación anterior para evitar "productos fantasma"
+        // al guardar. Una vez que el producto ha sido pasado, el slot anterior queda libre.
+        // La estación actual (idx) se limpia antes de que la siguiente (idx+1) tome el producto.
+        if (idx > 0) {
+            s->product_in_station[idx - 1].productId = 0; // Marcar como vacío
+        }
     }
 
+    // se sale
     munmap(s, sizeof(ShmState));
     _exit(0);
 }
