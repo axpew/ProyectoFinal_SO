@@ -16,6 +16,7 @@
 #include <QFile>
 #include <QDir>
 #include <QStandardPaths>
+#include <QPropertyAnimation>  // NUEVO
 #include "productioncontroller.h"
 #include "threadmanager.h"
 #include "transportbeltwidget.h"
@@ -33,18 +34,24 @@ private slots:
     void onPauseClicked();
     void onResumeClicked();
     void onShutdownClicked();
-    void onDeleteLotClicked();     // NUEVO SLOT
+    void onDeleteLotClicked();
     void pollSharedMemory();
     void onLogMessage(const QString &msg);
+    void onStatsUpdated(int productsProcessed, int threadsActive, int resourcesUsed);
 
 protected:
-      void closeEvent(QCloseEvent *event) override;
+    void closeEvent(QCloseEvent *event) override;
+
 private:
+    void showNotification(const QString &message, const QString &type = "info");
+
     QWidget *central;
     QVBoxLayout *mainLayout;
 
     QLabel *titleLabel;
     QLabel *counterLabel;
+    QLabel *statsLabel;
+    QLabel *notificationLabel;  //Barra de notificaciones
 
     QStackedWidget *viewStack;
 
@@ -52,12 +59,12 @@ private:
     QVector<QPushButton*> lineButtons;
 
     QWidget *bottomPanel;
-    QHBoxLayout *bottomLayout;
+    QVBoxLayout *bottomLayout;
 
     QPushButton *pauseButton;
     QPushButton *resumeButton;
     QPushButton *shutdownButton;
-    QPushButton *deleteLotButton;  // NUEVO BOTÓN
+    QPushButton *deleteLotButton;
 
     QTextEdit *logWidget;
 
@@ -68,9 +75,9 @@ private:
 
     int processedCount;
 
-    void saveState(); // Guardará el estado en un archivo JSON
-    void loadState(); // Cargará el estado desde el archivo JSON
-    QList<QPair<int, int>> m_productsToRestore; // Guarda: {productId, stationIndex}
+    void saveState();
+    void loadState();
+    QList<QPair<int, int>> m_productsToRestore;
     int m_nextProductIdToRestore = 1;
 };
 
