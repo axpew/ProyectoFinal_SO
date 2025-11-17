@@ -5,27 +5,27 @@
 
 #define NUM_STATIONS 5
 #define SHM_NAME "/sim_shm_if4001_v1"
+#define SEM_TRANSITION "/sim_sem_transition"  // Nuevo
 
 struct ProductInfo {
     int productId;
 };
 
 struct ShmState {
-    int running; // 1 running, 0 stop
-    int station_done[NUM_STATIONS]; // 0 = idle, 1 = done, 2 = being processed by GUI
-    int station_paused[NUM_STATIONS]; // 0 = running, 1 = paused
-
-    // Un buffer para saber qué producto está en cada estación
+    int running;
+    int station_done[NUM_STATIONS];
+    int station_paused[NUM_STATIONS];
     ProductInfo product_in_station[NUM_STATIONS];
-    int next_product_id; // Un contador global para nuevos IDs de producto
+    int next_product_id;
 };
 
 bool create_ipc();
-bool open_ipc(); // open existing mapping + sems
+bool open_ipc();
 void close_ipc();
 void destroy_ipc();
 
 sem_t* open_sem_stage(int idx);
 sem_t* open_sem_ack(int idx);
+sem_t* open_sem_transition();  // Nuevo
 
 #endif // IPC_COMMON_H
