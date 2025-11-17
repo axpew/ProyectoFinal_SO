@@ -36,7 +36,7 @@ private:
     QPixmap productPixmap;
     QTimer *moveTimer = nullptr;
     int productX = 0;
-    int beltSpeed = 2;       // será recalculado para lograr ~5s
+    int beltSpeed = 2;
     int totalSteps = 0;
     std::function<void()> onFinish = nullptr;
     bool paused = false;

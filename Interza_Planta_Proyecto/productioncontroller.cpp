@@ -34,7 +34,6 @@ bool ProductionController::initializeIPC(int nextProductIdToRestore, const QList
     if (!create_ipc()) { emit logMessage("ERROR: create_ipc falló."); return false; }
     if (!open_ipc()) { emit logMessage("ERROR: El controlador no pudo abrir la IPC."); return false; }
 
-
     int fd = shm_open(SHM_NAME, O_RDWR, 0666);
     if (fd == -1) { emit logMessage("shm_open init fail"); return false; }
     ShmState* s = (ShmState*)mmap(NULL, sizeof(ShmState), PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
@@ -42,27 +41,32 @@ bool ProductionController::initializeIPC(int nextProductIdToRestore, const QList
     if (s == MAP_FAILED) { emit logMessage("mmap fail"); return false; }
 
     s->running = 1;
+
+    // LIMPIAR TODO
     for (int i = 0; i < NUM_STATIONS; i++) {
         s->station_done[i] = 0;
         s->station_paused[i] = 0;
         s->product_in_station[i].productId = 0;
     }
+
     s->next_product_id = nextProductIdToRestore;
 
+    // Restaurar productos si hay
     for (const auto& pair : productsToRestore) {
         if (pair.second >= 0 && pair.second < NUM_STATIONS) {
             s->product_in_station[pair.second].productId = pair.first;
+            emit logMessage(QString("🔄 Restaurado producto %1 en estación %2")
+                                .arg(pair.first).arg(pair.second + 1));
         }
     }
+
     munmap(s, sizeof(ShmState));
 
     if (productsToRestore.isEmpty()) {
-        // Inicio limpio: solo arrancamos la estación 0.
         emit logMessage("Enviando señal de inicio a la estación 0...");
         sem_t* sem0 = open_sem_stage(0);
         if (sem0) sem_post(sem0);
     } else {
-        // Restauración: arrancamos solo las estaciones que tienen un producto.
         emit logMessage("Enviando señales de restauración a las estaciones...");
         for (const auto& pair : productsToRestore) {
             sem_t* sem_stage = open_sem_stage(pair.second);
@@ -71,7 +75,7 @@ bool ProductionController::initializeIPC(int nextProductIdToRestore, const QList
     }
 
     ipc_created = true;
-    emit logMessage("IPC inicializado y producción arrancada.");
+    emit logMessage("✅ IPC inicializado - Pipeline activado con limpieza segura");
     return true;
 }
 

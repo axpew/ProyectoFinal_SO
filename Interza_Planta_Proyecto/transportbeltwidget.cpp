@@ -10,7 +10,7 @@ TransportBeltWidget::TransportBeltWidget(QWidget *parent) : QWidget(parent)
     setMaximumHeight(140);
 
     moveTimer = new QTimer(this);
-    moveTimer->setInterval(30); // base: 30 ms por tick
+    moveTimer->setInterval(30);
     connect(moveTimer, &QTimer::timeout, this, &TransportBeltWidget::animateStep);
 }
 
@@ -26,7 +26,7 @@ void TransportBeltWidget::setupWithImage(const QString &resourcePath)
         productPixmap.fill(Qt::gray);
     }
 
-     productPixmap = productPixmap.scaled(64, 64, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    productPixmap = productPixmap.scaled(64, 64, Qt::KeepAspectRatio, Qt::SmoothTransformation);
 
     productX = -productPixmap.width();
     update();
@@ -36,29 +36,24 @@ void TransportBeltWidget::startAnimation(int cycles, std::function<void()> onFin
 {
     onFinish = onFinished;
 
-    // objetivo: que una pasada visible dure aproximadamente 5 segundos
     const int desired_seconds = 5;
 
-    // distancia a recorrer: desde -productWidth hasta width()
     int distance = width();
-    if (distance < 200) distance = 600; // fallback si el widget aún no fue mostrado
+    if (distance < 200) distance = 600;
 
     int pw = productPixmap.width() > 0 ? productPixmap.width() : 64;
     int totalDistance = distance + pw;
 
-    int interval_ms = moveTimer->interval(); // 30 por defecto
+    int interval_ms = moveTimer->interval();
 
-    // velocidad necesaria en pixeles por tick (float)
     double required_speed = (double)totalDistance * interval_ms / (1000.0 * desired_seconds);
     int calcSpeed = qMax(1, (int)qRound(required_speed));
 
     beltSpeed = calcSpeed;
 
-    // number of steps to complete the requested cycles
     int stepsPerCycle = totalDistance / qMax(1, beltSpeed);
     totalSteps = qMax(1, cycles) * stepsPerCycle;
 
-    // start from left
     productX = -pw;
     paused = false;
     if (!moveTimer->isActive()) moveTimer->start();
@@ -103,13 +98,19 @@ void TransportBeltWidget::animateStep()
     productX += beltSpeed;
     totalSteps--;
 
-    if (productX > width()) {
-        productX = -productPixmap.width();
-    }
-
     if (totalSteps <= 0) {
         moveTimer->stop();
-        if (onFinish) onFinish();
+        productX = -productPixmap.width();  // Ocultar
+        update();
+
+        if (onFinish) {
+            onFinish();
+        }
+        return;
+    }
+
+    if (productX > width()) {
+        productX = -productPixmap.width();
     }
 
     update();
@@ -121,9 +122,9 @@ void TransportBeltWidget::paintEvent(QPaintEvent *)
     p.setRenderHint(QPainter::Antialiasing);
 
     QRect r = rect();
-    p.fillRect(r, QColor(245, 238, 220)); // beige fondo de cinta
+    p.fillRect(r, QColor(245, 238, 220));
 
-    // franjas para sensación de movimiento
+    // Franjas
     int stripeW = 48;
     int offset = (productX / 4) % stripeW;
     for (int xx = -stripeW + offset; xx < width(); xx += stripeW) {
@@ -131,12 +132,11 @@ void TransportBeltWidget::paintEvent(QPaintEvent *)
         p.fillRect(stripe, QColor(230, 220, 200));
     }
 
-    if (!productPixmap.isNull()) {
-        int y = (height() - productPixmap.height()) / 2;
-        p.drawPixmap(productX, y, productPixmap);
-    } else {
-        QPixmap ph(64,64); ph.fill(Qt::gray);
-        int y = (height() - ph.height()) / 2;
-        p.drawPixmap(productX, y, ph);
+    // Producto
+    if (productX > -productPixmap.width() && productX < width()) {
+        if (!productPixmap.isNull()) {
+            int y = (height() - productPixmap.height()) / 2;
+            p.drawPixmap(productX, y, productPixmap);
+        }
     }
 }
