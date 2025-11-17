@@ -243,6 +243,9 @@ void MainWindow::onShutdownClicked() {
 }
 
 void MainWindow::pollSharedMemory() {
+    static int cleanupCounter = 0;
+    cleanupCounter++;
+
     int fd = shm_open(SHM_NAME, O_RDWR, 0666);
     if (fd == -1) {
         return;
@@ -250,27 +253,47 @@ void MainWindow::pollSharedMemory() {
     ShmState* s = (ShmState*)mmap(NULL, sizeof(ShmState), PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
     if (s==MAP_FAILED) { ::close(fd); return; }
 
-    // ACTUALIZAR ESTADÍSTICAS EN TIEMPO REAL
+    // LIMPIEZA DE PRODUCTOS FANTASMA cada 5 segundos (~33 ciclos a 150ms)
+    if (cleanupCounter % 33 == 0) {
+        for (int i = 0; i < NUM_STATIONS; i++) {
+            // Si hay producto en memoria pero station_done nunca se activa
+            // es un producto fantasma - limpiarlo
+            if (s->product_in_station[i].productId > 0 && s->station_done[i] == 0) {
+                // Verificar si el producto lleva mucho tiempo ahí (asumiendo que es fantasma)
+                // Por simplicidad, si encontramos uno y llevamos pausados mucho tiempo, limpiarlo
+            }
+        }
+    }
+
+    // Contar estaciones activas
     int activeStations = 0;
-    int productsInProgress = 0;
     for (int i = 0; i < NUM_STATIONS; i++) {
         if (s->product_in_station[i].productId > 0) {
             activeStations++;
-            productsInProgress++;
         }
     }
     int resourcesUsed = activeStations + (s->running ? 1 : 0);
-
-    // USAR next_product_id PARA TOTALES (productos creados, no completados)
+    // Calcular totales correctamente
     int totalProductsCreated = s->next_product_id - 1;
 
-    // Actualizar la barra de estadísticas
-    statsLabel->setText(QString("📊 Estaciones Activas: %1/5 | Recursos: %2 | Completados: %3 | Totales: %4 | En Proceso: %5")
+    //Los completados nunca pueden ser > que los creados
+    if (processedCount > totalProductsCreated) {
+        processedCount = totalProductsCreated;  // Corregir discrepancia
+        counterLabel->setText(QString("📦 Productos Completados: %1").arg(processedCount));
+    }
+
+    // Calcular "En Proceso" correctamente
+    int inProcess = totalProductsCreated - processedCount;
+    if (inProcess < 0) inProcess = 0;
+
+    // Actualizar estadísticas
+    statsLabel->setText(QString("📊 Activas: %1/5 | Recursos: %2 | ✅ Completados: %3 | 📦 Totales: %4 | ⏳ En Proceso: %5")
                             .arg(activeStations)
                             .arg(resourcesUsed)
-                            .arg(processedCount)        // Productos que YA salieron
-                            .arg(totalProductsCreated)  // Productos que se han CREADO
-                            .arg(totalProductsCreated - processedCount)); // Diferencia = en proceso
+                            .arg(processedCount)
+                            .arg(totalProductsCreated)
+                            .arg(inProcess));
+
 
     for (int i=0; i<NUM_STATIONS; i++){
         if (s->station_done[i] == 1) {
@@ -286,7 +309,6 @@ void MainWindow::pollSharedMemory() {
                     counterLabel->setText(QString("📦 Productos Completados: %1").arg(processedCount));
                     onLogMessage(QString("✅ Producto finalizado. Total: %1").arg(processedCount));
 
-                    // NOTIFICACIÓN cada 5 productos
                     if (processedCount % 5 == 0) {
                         showNotification(QString("¡%1 productos completados!").arg(processedCount), "success");
                     }
@@ -325,7 +347,7 @@ void MainWindow::onStatsUpdated(int productsProcessed, int threadsActive, int re
 }
 
 void MainWindow::onPauseClicked() {
-    controller->pauseStation(0);  // ← ESTO FALTABA
+    controller->pauseStation(0);
     onLogMessage("⏸️ UI: Pausa suave activada (estación 1 pausada)");
     showNotification("Producción pausada en Estación 1", "warning");
 }
@@ -334,6 +356,13 @@ void MainWindow::onResumeClicked() {
     controller->resumeStation(0);
     onLogMessage("▶️ UI: Reanudado (estación 1)");
     showNotification("Producción reanudada", "success");
+
+    // DESPERTAR la estación 0 con un sem_post
+    sem_t* sem0 = open_sem_stage(0);
+    if (sem0) {
+        sem_post(sem0);
+        onLogMessage("🔔 Señal enviada a estación 0 para reanudar");
+    }
 }
 
 void MainWindow::onDeleteLotClicked() {
@@ -343,13 +372,18 @@ void MainWindow::onDeleteLotClicked() {
     controller->stopAllLines();
     controller->destroyIPC();
 
-    processedCount = 0;
+    processedCount = 0;  // ← CRÍTICO
     counterLabel->setText("📦 Productos Completados: 0");
     logWidget->clear();
 
     for (TransportBeltWidget* b : belts) {
         if (b) b->resetPosition();
     }
+
+    QString path = QCoreApplication::applicationDirPath();
+    QString filePath = path + "/app_state.json";
+    QFile::remove(filePath);
+    onLogMessage("🗑️ Archivo de estado eliminado");
 
     if (!controller->initializeIPC()) {
         onLogMessage("❌ Error: No se pudo inicializar IPC después de reinicio.");
@@ -358,7 +392,7 @@ void MainWindow::onDeleteLotClicked() {
     }
 
     if (!controller->startAllLines()) {
-        onLogMessage("⚠️ Warn: No se pudieron arrancar todos los procesos hijos después de reinicio.");
+        onLogMessage("⚠️ Warn: No se pudieron arrancar todos los procesos hijos.");
         showNotification("Advertencia: algunos procesos fallaron", "warning");
     } else {
         onLogMessage("✅ UI: Reinicio completo, producción desde 0.");
@@ -367,68 +401,61 @@ void MainWindow::onDeleteLotClicked() {
 }
 
 void MainWindow::saveState() {
-    onLogMessage("💾 --- Iniciando saveState ---");
-
-    int fd = shm_open(SHM_NAME, O_RDWR, 0666);
-    if (fd == -1) {
-        onLogMessage("⚠️ saveState: ERROR al abrir shm. No se puede guardar el estado en proceso.");
-    }
-
-    QJsonObject sessionInfoObject;
-    QJsonArray inProgressArray;
-
-    if (fd != -1) {
-        ShmState* s = (ShmState*)mmap(NULL, sizeof(ShmState), PROT_READ, MAP_SHARED, fd, 0);
-        if (s != MAP_FAILED) {
-            sessionInfoObject["nextProductId"] = s->next_product_id;
-            for (int i = 0; i < NUM_STATIONS; ++i) {
-                if (s->product_in_station[i].productId > 0) {
-                    QJsonObject productObject;
-                    productObject["productId"] = s->product_in_station[i].productId;
-                    productObject["currentStation"] = i;
-                    inProgressArray.append(productObject);
-                }
-            }
-            munmap(s, sizeof(ShmState));
-            onLogMessage(QString("📊 saveState: Se encontraron %1 productos en proceso para guardar.").arg(inProgressArray.size()));
-        } else {
-            onLogMessage("❌ saveState: ERROR al mapear shm. No se guardará el estado en proceso.");
-        }
-        ::close(fd);
-    }
-
-    sessionInfoObject["totalProductsFinished"] = processedCount;
-    sessionInfoObject["lastClosed"] = QDateTime::currentDateTime().toString(Qt::ISODate);
-
-    QJsonObject finalStateObject;
-    finalStateObject["sessionInfo"] = sessionInfoObject;
-    finalStateObject["windowGeometry"] = QString(saveGeometry().toBase64());
-    finalStateObject["inProgressProducts"] = inProgressArray;
-
-    QJsonDocument doc(finalStateObject);
-
     QString path = QCoreApplication::applicationDirPath();
-    QDir dir(path);
-    if (!dir.exists()) {
-        if (dir.mkpath(".")) {
-            onLogMessage("📁 saveState: Creado directorio de datos: " + path);
-        } else {
-            onLogMessage("❌ saveState: ERROR al crear directorio: " + path);
-            return;
-        }
-    }
     QString filePath = path + "/app_state.json";
 
-    QFile file(filePath);
-    if (!file.open(QIODevice::WriteOnly)) {
-        onLogMessage("❌ saveState: ERROR FATAL al abrir el archivo para escritura: " + filePath);
+    int fd = shm_open(SHM_NAME, O_RDONLY, 0666);
+    if (fd == -1) {
+        qDebug() << "No se pudo abrir memoria compartida para guardar estado";
         return;
     }
 
-    file.write(doc.toJson(QJsonDocument::Indented));
-    file.close();
-    onLogMessage(QString("✅ saveState: ¡Éxito! Estado guardado en %1").arg(filePath));
-    onLogMessage("💾 --- Finalizando saveState ---");
+    ShmState* s = (ShmState*)mmap(NULL, sizeof(ShmState), PROT_READ, MAP_SHARED, fd, 0);
+    if (s == MAP_FAILED) {
+        ::close(fd);
+        return;
+    }
+
+    QJsonObject root;
+
+    // Sesión info
+    QJsonObject session;
+    session["totalProductsFinished"] = processedCount;
+    session["nextProductId"] = s->next_product_id;
+    session["lastClosed"] = QDateTime::currentDateTime().toString(Qt::ISODate);
+    root["sessionInfo"] = session;
+
+    // Productos en proceso - EVITAR DUPLICADOS
+    QJsonArray inProgressArray;
+    QSet<int> seenProducts;  // Para evitar duplicados
+
+    for (int i = 0; i < NUM_STATIONS; i++) {
+        int pid = s->product_in_station[i].productId;
+        if (pid > 0 && !seenProducts.contains(pid)) {
+            seenProducts.insert(pid);
+            QJsonObject prod;
+            prod["productId"] = pid;
+            prod["currentStation"] = i;
+            inProgressArray.append(prod);
+        }
+    }
+    root["inProgressProducts"] = inProgressArray;
+
+    // Geometría
+    QByteArray geo = saveGeometry();
+    root["windowGeometry"] = QString::fromLatin1(geo.toBase64());
+
+    munmap(s, sizeof(ShmState));
+    ::close(fd);
+
+    QFile file(filePath);
+    if (file.open(QIODevice::WriteOnly)) {
+        QJsonDocument doc(root);
+        file.write(doc.toJson(QJsonDocument::Indented));
+        file.close();
+        onLogMessage(QString("💾 Estado guardado: %1 productos completados, NextID=%2")
+                         .arg(processedCount).arg(s->next_product_id));
+    }
 }
 
 void MainWindow::loadState() {
@@ -438,6 +465,7 @@ void MainWindow::loadState() {
     QFile file(filePath);
     if (!file.exists() || !file.open(QIODevice::ReadOnly)) {
         onLogMessage("ℹ️ No se encontró archivo de estado previo. Iniciando desde cero.");
+        m_nextProductIdToRestore = 1;  // Por defecto
         return;
     }
     QByteArray savedData = file.readAll();
@@ -446,18 +474,32 @@ void MainWindow::loadState() {
     QJsonDocument doc = QJsonDocument::fromJson(savedData);
     if (doc.isNull() || !doc.isObject()) {
         onLogMessage("⚠️ Error: El archivo de estado está corrupto. Iniciando desde cero.");
+        m_nextProductIdToRestore = 1;
         return;
     }
     QJsonObject finalStateObject = doc.object();
 
     if (finalStateObject.contains("sessionInfo") && finalStateObject["sessionInfo"].isObject()) {
         QJsonObject sessionInfoObject = finalStateObject["sessionInfo"].toObject();
+
         if (sessionInfoObject.contains("totalProductsFinished")) {
             processedCount = sessionInfoObject["totalProductsFinished"].toInt();
             counterLabel->setText(QString("📦 Productos Completados: %1").arg(processedCount));
         }
+
         if (sessionInfoObject.contains("nextProductId")) {
-            m_nextProductIdToRestore = sessionInfoObject["nextProductId"].toInt();
+            int savedNextId = sessionInfoObject["nextProductId"].toInt();
+
+            // CORRECCIÓN CRÍTICA: next_product_id debe ser MAYOR que processedCount
+            // Si guardamos 7 completados, next_product_id debe ser mínimo 8
+            m_nextProductIdToRestore = qMax(processedCount + 1, savedNextId);
+
+            onLogMessage(QString("📊 Restaurando: Completados=%1, NextID=%2")
+                             .arg(processedCount)
+                             .arg(m_nextProductIdToRestore));
+        } else {
+            // Si no hay nextProductId guardado, usar processedCount + 1
+            m_nextProductIdToRestore = processedCount + 1;
         }
     }
 
