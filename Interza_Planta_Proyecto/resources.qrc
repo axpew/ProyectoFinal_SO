@@ -1,0 +1,9 @@
+<RCC>
+    <qresource prefix="/images">
+        <file>images/ensamble.png</file>
+        <file>images/calidad.png</file>
+        <file>images/empaque.png</file>
+        <file>images/envoltorio.png</file>
+        <file>images/pListo.png</file>
+    </qresource>
+</RCC>
